@@ -349,30 +349,45 @@ def fetch_foreign_trend(code: str, pages: int = 4) -> dict:
 
 
 # ────────────────────────────────────────────────────────
-# 3. 매크로 (yfinance)
+# 3. 매크로 (yfinance) — 실행당 1회 캐시
 # ────────────────────────────────────────────────────────
+_MACRO_CACHE = None
+
+
 def fetch_macro() -> dict:
-    """미 10Y, VIX, USD/KRW, KOSPI — 1년 히스토리 기반 지표"""
+    """미 10Y, VIX, USD/KRW, KOSPI — 1년 히스토리 기반 지표 (실행당 1회만 조회)"""
+    global _MACRO_CACHE
+    if _MACRO_CACHE is not None:
+        return _MACRO_CACHE
+
     out = {}
     tickers = {"tnx": "^TNX", "vix": "^VIX", "krw": "KRW=X", "kospi": "^KS11"}
     for key, tk in tickers.items():
         try:
             h = yf.Ticker(tk).history(period="1y")["Close"].dropna()
+            h = h[h > 0]  # 0/음수 글리치 제거
             if len(h) < 20:
                 out[key] = None
                 continue
             cur = float(h.iloc[-1])
+
+            def base(n):
+                """단일 이상 틱 방어: n일 전 시점 ±2일 평균을 기준가로 사용"""
+                if len(h) <= n + 2:
+                    return float(h.iloc[0])
+                return float(h.iloc[-(n + 2):-(n - 2)].mean())
+
             out[key] = {
                 "current": cur,
                 "min": float(h.min()),
                 "max": float(h.max()),
-                "chg_3m": (cur / float(h.iloc[-63]) - 1) * 100 if len(h) > 63 else 0.0,
-                "chg_20d": (cur / float(h.iloc[-20]) - 1) * 100,
-                "chg_60d": (cur / float(h.iloc[-60]) - 1) * 100 if len(h) > 60 else 0.0,
-                "series": h,
+                "chg_3m": (cur / base(63) - 1) * 100 if len(h) > 65 else 0.0,
+                "chg_20d": (cur / base(20) - 1) * 100,
+                "chg_60d": (cur / base(60) - 1) * 100 if len(h) > 62 else 0.0,
             }
         except Exception:
             out[key] = None
+    _MACRO_CACHE = out
     return out
 
 
@@ -387,3 +402,47 @@ def fetch_stock_history(code: str) -> dict:
     except Exception:
         pass
     return {"chg_60d": None}
+
+
+# ────────────────────────────────────────────────────────
+# 원격 진단: 네이버 원본 응답 요약 (/raw 명령용)
+# ────────────────────────────────────────────────────────
+def raw_probe(code: str) -> str:
+    """integration/basic/frgn의 실제 응답 구조를 요약해 반환 → 파서 원격 보정용"""
+    import json as _json
+    lines = [f"🔬 RAW PROBE — {code}"]
+
+    st, basic = _get_json_status(NAVER_API.format(code=code, path="basic"),
+                                 referer="https://m.stock.naver.com/")
+    lines.append(f"\n[basic] status={st}")
+    if basic:
+        lines.append("keys: " + ", ".join(list(basic.keys())[:15]))
+        lines.append(f"stockName={basic.get('stockName')} "
+                     f"closePrice={basic.get('closePrice')}")
+
+    st, integ = _get_json_status(NAVER_API.format(code=code, path="integration"),
+                                 referer="https://m.stock.naver.com/")
+    lines.append(f"\n[integration] status={st}")
+    if integ:
+        lines.append("keys: " + ", ".join(list(integ.keys())[:15]))
+        cons = integ.get("consensusInfo")
+        lines.append("consensusInfo: " + _json.dumps(cons, ensure_ascii=False)[:350])
+        ti = integ.get("totalInfos")
+        if isinstance(ti, list):
+            lines.append(f"totalInfos {len(ti)}건, 샘플:")
+            for item in ti[:6]:
+                lines.append("  " + _json.dumps(item, ensure_ascii=False)[:120])
+        else:
+            lines.append(f"totalInfos 타입: {type(ti).__name__}")
+
+    try:
+        r = requests.get(f"https://finance.naver.com/item/frgn.naver?code={code}",
+                         headers=_headers("https://finance.naver.com/"), timeout=10)
+        html = r.content.decode("euc-kr", errors="ignore")
+        n_dates = len(re.findall(r'\d{4}\.\d{2}\.\d{2}', html))
+        lines.append(f"\n[frgn] status={r.status_code}, 날짜행 {n_dates}건, "
+                     f"길이 {len(html)}")
+    except Exception as e:
+        lines.append(f"\n[frgn] ERR:{type(e).__name__}")
+
+    return "\n".join(lines)[:3800]  # 텔레그램 메시지 한도 내
