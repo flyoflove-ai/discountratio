@@ -62,6 +62,14 @@ def handle_text(chat_id, text):
     if text.startswith(("/help", "/start")):
         send(chat_id, HELP_TEXT)
         return
+    if text.startswith("/debug"):
+        # 원격 진단: 검색 레이어별 상태 회신 (예: /debug 삼성전자)
+        m = re.match(r"^/debug(?:@\w+)?\s+(.+)$", text)
+        q = m.group(1).strip() if m else "삼성전자"
+        _, logs = resolve_stock(q, debug=True)
+        send(chat_id, "🔧 <b>검색 레이어 진단</b> — '" + q + "'\n\n"
+             + "\n".join(f"· <code>{l}</code>" for l in logs))
+        return
     if text.startswith("/"):
         # 구버전 호환: /discount 삼성전자, /d 005930
         m = re.match(r"^/(discount|d)(?:@\w+)?\s+(.+)$", text)
