@@ -1,18 +1,21 @@
 name: discount-bot
 
+# 상주 루프 구조: 1시간마다 기동 → 55분간 long polling 상주 (메시지 수 초 내 응답)
+# ⚠️ Public repo 필수 (Actions 무제한). Private면 월 2,000분 한도를 하루 만에 소진.
+
 on:
   schedule:
-    - cron: "*/5 * * * *"   # 5분 주기 폴링 (GitHub 크론 특성상 실제 2~10분 지연 가능)
-  workflow_dispatch:         # 수동 즉시 실행
+    - cron: "0 22,23,0-15 * * *"   # UTC 기준 = KST 07:00~다음날 00:59 상주
+  workflow_dispatch:          # 수동 기동 (첫 배포 직후 이걸로 즉시 시작)
 
 concurrency:
-  group: discount-bot        # 동시 실행 방지 (getUpdates 충돌 예방)
+  group: discount-bot         # 중복 상주 방지 (getUpdates 충돌 예방)
   cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 58
     steps:
       - uses: actions/checkout@v4
 
@@ -24,8 +27,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run bot
+      - name: Run bot (55분 상주 루프)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LOOP_MINUTES: "55"
         run: python main.py
