@@ -5,7 +5,7 @@ name: discount-bot
 
 on:
   schedule:
-    - cron: "0 * * * *"   
+    - cron: "0 * * * *"      # 매시 정각 기동
   workflow_dispatch:          # 수동 기동 (첫 배포 직후 이걸로 즉시 시작)
 
 concurrency:
