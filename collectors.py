@@ -43,6 +43,95 @@ def _to_float(x):
 
 
 # ────────────────────────────────────────────────────────
+# 0. 종목명 → 코드 변환 (네이버 검색)
+# ────────────────────────────────────────────────────────
+def _extract_stock_items(obj, found):
+    """JSON 어디에 있든 {6자리 코드 + 종목명} 딕셔너리를 재귀 탐색 (스키마 변동 대비)"""
+    if isinstance(obj, dict):
+        code = None
+        for key in ("itemCode", "code", "cd", "stockCode"):
+            v = obj.get(key)
+            if isinstance(v, str) and re.fullmatch(r"\d{6}", v):
+                code = v
+                break
+        name = None
+        for key in ("stockName", "name", "nm", "itemName"):
+            v = obj.get(key)
+            if isinstance(v, str) and v.strip():
+                name = v.strip()
+                break
+        if code and name:
+            found.append((code, name))
+        for v in obj.values():
+            _extract_stock_items(v, found)
+    elif isinstance(obj, list):
+        for v in obj:
+            _extract_stock_items(v, found)
+
+
+def resolve_stock(query: str):
+    """
+    입력: 종목명 또는 6자리 코드
+    반환: ("ok", code, name) | ("ambiguous", [(code, name), ...]) | ("notfound", None)
+    """
+    from urllib.parse import quote
+    q = query.strip()
+
+    # 6자리 코드면 그대로 사용 (이름은 basic에서 확인)
+    if re.fullmatch(r"\d{6}", q):
+        basic = _get_json(NAVER_API.format(code=q, path="basic"))
+        name = basic.get("stockName") if basic else q
+        return ("ok", q, name)
+
+    candidates = []
+
+    # 1차: 네이버 모바일 통합검색 API
+    data = _get_json(f"https://m.stock.naver.com/api/search/all"
+                     f"?query={quote(q)}&page=1&pageSize=10")
+    if data:
+        _extract_stock_items(data, candidates)
+
+    # 2차 fallback: 네이버 자동완성 (legacy, 리스트 of 리스트 형식)
+    if not candidates:
+        try:
+            r = requests.get(
+                f"https://ac.stock.naver.com/ac?q={quote(q)}"
+                f"&target=stock&st=111&r_lt=111",
+                headers=HEADERS, timeout=10)
+            for group in r.json().get("items", []):
+                for item in group:
+                    flat = [x[0] if isinstance(x, list) else x for x in item]
+                    codes = [x for x in flat
+                             if isinstance(x, str) and re.fullmatch(r"\d{6}", x)]
+                    names = [x for x in flat
+                             if isinstance(x, str) and x and not x.isdigit()
+                             and not re.fullmatch(r"\d{6}", x)]
+                    if codes and names:
+                        candidates.append((codes[0], names[0]))
+        except Exception:
+            pass
+
+    # 중복 제거 (순서 유지)
+    seen, uniq = set(), []
+    for c, n in candidates:
+        if c not in seen:
+            seen.add(c)
+            uniq.append((c, n))
+
+    if not uniq:
+        return ("notfound", None)
+
+    # 정확히 일치하는 이름 우선 (예: '삼성전자' vs '삼성전자우')
+    exact = [(c, n) for c, n in uniq if n == q]
+    if exact:
+        return ("ok", exact[0][0], exact[0][1])
+    if len(uniq) == 1:
+        return ("ok", uniq[0][0], uniq[0][1])
+    # 첫 후보가 쿼리로 시작하고 나머지는 파생(우선주 등)인 경우가 대부분 → 상위 5개 제시
+    return ("ambiguous", uniq[:5])
+
+
+# ────────────────────────────────────────────────────────
 # 1. 종목 기본 정보 + 컨센서스 (네이버)
 # ────────────────────────────────────────────────────────
 def fetch_stock_snapshot(code: str) -> dict:
