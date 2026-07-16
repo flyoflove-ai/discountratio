@@ -2,8 +2,10 @@ name: discount-bot
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # 15분마다 메시지 폴링 (Actions 크론은 지연 가능)
-  workflow_dispatch:          # 수동 실행으로 즉시 응답 가능
+    - cron: "*/15 * * * *"   # 폴링 모드 (즉시 실행 모드 활성화 후엔 삭제 가능)
+  workflow_dispatch:          # 수동 실행
+  repository_dispatch:        # 즉시 실행 모드: Cloudflare Worker가 트리거
+    types: [telegram]
 
 jobs:
   run:
@@ -24,4 +26,5 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_UPDATE_JSON: ${{ toJSON(github.event.client_payload.update) }}
         run: python main.py
