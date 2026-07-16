@@ -171,9 +171,65 @@ def main():
     print("실행 완료")
 
 
-if __name__ == "__main__":
+# ── 상주 루프 모드: LOOP_MINUTES 동안 long polling으로 대기, 수 초 내 응답 ──
+def loop_mode(minutes: int):
+    import time
+    deadline = time.time() + minutes * 60
+    offset = None
+    print(f"루프 모드 시작 — {minutes}분간 상주")
+
     try:
-        main()
+        requests.get(f"{API}/deleteWebhook", timeout=15)
+    except Exception:
+        pass
+
+    while time.time() < deadline:
+        try:
+            params = {"timeout": 45}
+            if offset is not None:
+                params["offset"] = offset
+            r = requests.get(f"{API}/getUpdates", params=params, timeout=60).json()
+            if not r.get("ok"):
+                desc = r.get("description", "")
+                if "conflict" in desc.lower():
+                    print("다른 인스턴스가 폴링 중 → 20초 대기")
+                    time.sleep(20)
+                    continue
+                print(f"getUpdates 오류: {desc}", file=sys.stderr)
+                time.sleep(10)
+                continue
+            for u in r.get("result", []):
+                offset = u["update_id"] + 1   # 다음 long poll 호출이 곧 확정(ack) 역할
+                process_update(u)
+                print(f"update {u['update_id']} 처리")
+        except requests.exceptions.Timeout:
+            continue
+        except Exception:
+            print(traceback.format_exc(), file=sys.stderr)
+            time.sleep(10)
+
+    # 종료 전 마지막 offset 확정
+    if offset is not None:
+        try:
+            requests.get(f"{API}/getUpdates",
+                         params={"offset": offset, "limit": 1, "timeout": 0},
+                         timeout=20)
+        except Exception:
+            pass
+    print("루프 모드 종료 (다음 크론이 이어받음)")
+
+
+if __name__ == "__main__":
+    import os
+    try:
+        loop_min = int(os.environ.get("LOOP_MINUTES", "0") or "0")
+        if loop_min > 0:
+            if not TELEGRAM_BOT_TOKEN:
+                print("TELEGRAM_BOT_TOKEN 미설정", file=sys.stderr)
+                sys.exit(1)
+            loop_mode(loop_min)
+        else:
+            main()
     except Exception:
         err = traceback.format_exc()
         print(err, file=sys.stderr)
