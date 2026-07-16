@@ -39,7 +39,7 @@
 2. Settings → Secrets and variables → Actions에 등록:
    - `TELEGRAM_BOT_TOKEN` (기존 봇 재사용 가능, 단 리서치 에이전트와 같은 봇이면 getUpdates offset 충돌 → **별도 봇 신규 발급 권장**, @BotFather 무료)
    - `TELEGRAM_CHAT_ID` (실패 알림 수신용)
-3. Actions 탭에서 workflow 활성화 — 15분 크론 폴링 (workflow_dispatch로 즉시 실행 가능)
+3. Actions 탭에서 workflow 활성화 — 5분 크론 폴링 (workflow_dispatch로 즉시 실행 가능)
 
 ## 주의사항 / 알려진 한계
 
@@ -47,7 +47,8 @@
 - **네이버 API 스키마 변동 가능**: `collectors.py`의 `integration`/`frgn` 파싱은 스키마 변경 시 부분 실패할 수 있음 (실패 항목은 ⚪ 표시, 배분에서 자동 제외). 최초 배포 시 삼성전자(005930)로 실행해 각 항목이 채워지는지 검증 권장.
 - **공매도 잔고**: KRX API 인증 이슈로 v1 제외. v2 후보.
 - **KOSDAQ 종목**: yfinance에서 `.KS` 실패 시 `.KQ` 자동 재시도.
-- **응답 지연**: Actions 크론 특성상 최대 15~20분. 즉시 필요하면 Actions 탭에서 수동 실행.
+- **응답 지연**: 5분 크론이지만 GitHub 스케줄러 특성상 실제 2~10분. 즉시 필요하면 Actions 탭에서 수동 실행.
+- **무료 한도(중요)**: Private repo는 Actions 월 2,000분 한도. 5분 크론(월 ~8,600회×1분)은 한도를 크게 초과함 → **repo를 Public으로 생성할 것** (Public은 무제한 무료, 코드에 토큰이 없어 공개해도 안전 — 토큰은 전부 Secrets에만 존재).
 
 ## v2 로드맵 (선택)
 
