@@ -21,6 +21,32 @@ HEADERS = {
 NAVER_API = "https://m.stock.naver.com/api/stock/{code}/{path}"
 
 
+def _headers(referer=None):
+    h = dict(HEADERS)
+    if referer:
+        h["Referer"] = referer
+    h["Accept"] = "application/json, text/html, */*"
+    h["Accept-Language"] = "ko-KR,ko;q=0.9,en;q=0.8"
+    return h
+
+
+def _get_json_status(url, referer=None, retries=1):
+    """(status_code, json|None) 반환 — 진단 로깅용"""
+    last = "NO_RESPONSE"
+    for i in range(retries + 1):
+        try:
+            r = requests.get(url, headers=_headers(referer), timeout=10)
+            last = r.status_code
+            if r.status_code == 200:
+                return r.status_code, r.json()
+        except ValueError:
+            return f"{last}:NOT_JSON", None
+        except Exception as e:
+            last = f"ERR:{type(e).__name__}"
+        time.sleep(0.5 + i)
+    return last, None
+
+
 def _get_json(url, retries=2):
     for i in range(retries + 1):
         try:
@@ -65,17 +91,32 @@ def _extract_stock_items(obj, found):
         for v in obj.values():
             _extract_stock_items(v, found)
     elif isinstance(obj, list):
+        # legacy 자동완성 포맷: ["005930", "삼성전자", ...] 문자열 리스트
+        strs = [x for x in obj if isinstance(x, str)]
+        if strs:
+            codes = [x for x in strs if re.fullmatch(r"\d{6}", x)]
+            names = [x for x in strs
+                     if x and not re.fullmatch(r"[\d,.%]+", x)
+                     and not x.startswith("http")]
+            if codes and names:
+                found.append((codes[0], names[0]))
         for v in obj:
             _extract_stock_items(v, found)
 
 
-def resolve_stock(query: str):
+def resolve_stock(query: str, debug: bool = False):
     """
     입력: 종목명 또는 6자리 코드
     반환: ("ok", code, name) | ("ambiguous", [(code, name), ...]) | ("notfound", None)
+    debug=True 시 ("debug", [레이어별 결과 문자열]) 반환
+
+    5중 fallback (네이버가 해외 IP를 차단해도 다음/야후 레이어로 커버):
+      L1 네이버 자동완성 → L2 네이버 모바일 검색 → L3 네이버 데스크톱 검색(EUC-KR)
+      → L4 다음 금융 검색 → L5 야후 파이낸스 검색
     """
     from urllib.parse import quote
     q = query.strip()
+    logs = []
 
     # 6자리 코드면 그대로 사용 (이름은 basic에서 확인)
     if re.fullmatch(r"\d{6}", q):
@@ -83,33 +124,106 @@ def resolve_stock(query: str):
         name = basic.get("stockName") if basic else q
         return ("ok", q, name)
 
-    candidates = []
+    # ── L1: 네이버 자동완성 (신구 스키마 모두 재귀 추출) ──
+    def layer_naver_ac():
+        url = (f"https://ac.stock.naver.com/ac?q={quote(q)}"
+               f"&target=index%2Cstock%2Cmarketindicator")
+        st, data = _get_json_status(url, referer="https://finance.naver.com/")
+        found = []
+        if data:
+            _extract_stock_items(data, found)
+        return st, found
 
-    # 1차: 네이버 모바일 통합검색 API
-    data = _get_json(f"https://m.stock.naver.com/api/search/all"
-                     f"?query={quote(q)}&page=1&pageSize=10")
-    if data:
-        _extract_stock_items(data, candidates)
+    # ── L2: 네이버 모바일 통합검색 ──
+    def layer_naver_mobile():
+        url = (f"https://m.stock.naver.com/api/search/all"
+               f"?query={quote(q)}&page=1&pageSize=10")
+        st, data = _get_json_status(url, referer="https://m.stock.naver.com/")
+        found = []
+        if data:
+            _extract_stock_items(data, found)
+        return st, found
 
-    # 2차 fallback: 네이버 자동완성 (legacy, 리스트 of 리스트 형식)
-    if not candidates:
+    # ── L3: 네이버 데스크톱 검색 (구형이지만 안정적, EUC-KR 인코딩 필요) ──
+    def layer_naver_desktop():
         try:
-            r = requests.get(
-                f"https://ac.stock.naver.com/ac?q={quote(q)}"
-                f"&target=stock&st=111&r_lt=111",
-                headers=HEADERS, timeout=10)
-            for group in r.json().get("items", []):
-                for item in group:
-                    flat = [x[0] if isinstance(x, list) else x for x in item]
-                    codes = [x for x in flat
-                             if isinstance(x, str) and re.fullmatch(r"\d{6}", x)]
-                    names = [x for x in flat
-                             if isinstance(x, str) and x and not x.isdigit()
-                             and not re.fullmatch(r"\d{6}", x)]
-                    if codes and names:
-                        candidates.append((codes[0], names[0]))
+            eq = quote(q.encode("euc-kr"))
         except Exception:
-            pass
+            eq = quote(q)
+        url = f"https://finance.naver.com/search/searchList.naver?query={eq}"
+        try:
+            r = requests.get(url, headers=_headers("https://finance.naver.com/"),
+                             timeout=10)
+            st = r.status_code
+            html = r.content.decode("euc-kr", errors="ignore")
+            raw = re.findall(
+                r'item/main\.naver\?code=(\d{6})[^>]*>(.*?)</a>', html, re.S)
+            found = []
+            for c, inner in raw:
+                nm = re.sub(r'<[^>]+>', '', inner).strip()
+                if nm:
+                    found.append((c, nm))
+            return st, found
+        except Exception as e:
+            return f"ERR:{type(e).__name__}", []
+
+    # ── L4: 다음 금융 검색 ──
+    def layer_daum():
+        url = f"https://finance.daum.net/api/search/quotes?q={quote(q)}"
+        st, data = _get_json_status(url, referer="https://finance.daum.net/")
+        found = []
+        if data:
+            _extract_stock_items(data, found)
+            # 다음은 "A005930" 형식 symbolCode 사용 → 재귀 추출이 놓치면 직접 스캔
+            def scan(obj):
+                if isinstance(obj, dict):
+                    sym = obj.get("symbolCode") or obj.get("symbol") or ""
+                    nm = obj.get("name") or obj.get("shortName") or ""
+                    m = re.fullmatch(r"A(\d{6})", str(sym))
+                    if m and nm:
+                        found.append((m.group(1), str(nm).strip()))
+                    for v in obj.values():
+                        scan(v)
+                elif isinstance(obj, list):
+                    for v in obj:
+                        scan(v)
+            scan(data)
+        return st, found
+
+    # ── L5: 야후 파이낸스 검색 (미국 IP에서 가장 안정적) ──
+    def layer_yahoo():
+        url = (f"https://query2.finance.yahoo.com/v1/finance/search"
+               f"?q={quote(q)}&quotesCount=10&newsCount=0")
+        st, data = _get_json_status(url, referer=None)
+        found = []
+        for item in (data or {}).get("quotes", []):
+            sym = str(item.get("symbol") or "")
+            m = re.fullmatch(r"(\d{6})\.(KS|KQ)", sym)
+            if m:
+                nm = item.get("longname") or item.get("shortname") or q
+                found.append((m.group(1), str(nm).strip()))
+        return st, found
+
+    layers = [("naver_ac", layer_naver_ac), ("naver_mobile", layer_naver_mobile),
+              ("naver_desktop", layer_naver_desktop), ("daum", layer_daum),
+              ("yahoo", layer_yahoo)]
+
+    candidates = []
+    for name_, fn in layers:
+        try:
+            st, found = fn()
+        except Exception as e:
+            st, found = f"ERR:{type(e).__name__}", []
+        logs.append(f"{name_}: status={st}, {len(found)}건"
+                    + (f" (예: {found[0][1]} {found[0][0]})" if found else ""))
+        print(f"[resolve] {logs[-1]}")  # Actions 로그용
+        if found and not debug:
+            candidates = found
+            break
+        candidates = candidates or found
+
+    if debug:
+        return ("debug", logs)
 
     # 중복 제거 (순서 유지)
     seen, uniq = set(), []
@@ -127,7 +241,7 @@ def resolve_stock(query: str):
         return ("ok", exact[0][0], exact[0][1])
     if len(uniq) == 1:
         return ("ok", uniq[0][0], uniq[0][1])
-    # 첫 후보가 쿼리로 시작하고 나머지는 파생(우선주 등)인 경우가 대부분 → 상위 5개 제시
+    # 야후 레이어는 영문명 반환 → 정확 일치가 없어도 첫 후보가 사실상 정답인 경우가 많음
     return ("ambiguous", uniq[:5])
 
 
