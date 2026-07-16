@@ -70,6 +70,13 @@ def handle_text(chat_id, text):
         send(chat_id, "🔧 <b>검색 레이어 진단</b> — '" + q + "'\n\n"
              + "\n".join(f"· <code>{l}</code>" for l in logs))
         return
+    if text.startswith("/raw"):
+        # 원격 진단: 네이버 원본 응답 구조 회신 (예: /raw 005930)
+        from collectors import raw_probe
+        m = re.match(r"^/raw(?:@\w+)?\s+(\d{6})\s*$", text)
+        code = m.group(1) if m else "005930"
+        send(chat_id, f"<code>{raw_probe(code)}</code>")
+        return
     if text.startswith("/"):
         # 구버전 호환: /discount 삼성전자, /d 005930
         m = re.match(r"^/(discount|d)(?:@\w+)?\s+(.+)$", text)
@@ -116,6 +123,19 @@ def process_update(u):
             pass
 
 
+MAX_UPDATES_PER_RUN = 5  # 실행당 처리 상한 (타임아웃 방지, 초과분은 다음 실행에서)
+
+
+def ack(update_id):
+    """해당 update까지 확정 — 메시지 하나 처리할 때마다 즉시 호출"""
+    try:
+        requests.get(f"{API}/getUpdates",
+                     params={"offset": update_id + 1, "limit": 1, "timeout": 0},
+                     timeout=20)
+    except Exception:
+        pass
+
+
 def main():
     if not TELEGRAM_BOT_TOKEN:
         print("TELEGRAM_BOT_TOKEN 미설정", file=sys.stderr)
@@ -129,21 +149,26 @@ def main():
 
     r = requests.get(f"{API}/getUpdates", params={"timeout": 0}, timeout=20).json()
     if not r.get("ok"):
-        raise RuntimeError(f"getUpdates 실패: {r.get('description', '')}")
+        desc = r.get("description", "")
+        if "conflict" in desc.lower():
+            print("다른 실행이 getUpdates 사용 중 → 이번 회차 스킵 (정상)")
+            return
+        raise RuntimeError(f"getUpdates 실패: {desc}")
 
     updates = r.get("result", [])
     if not updates:
         print("처리할 메시지 없음")
         return
 
-    for u in updates:
+    for i, u in enumerate(updates):
+        if i >= MAX_UPDATES_PER_RUN:
+            print(f"상한 도달 — 잔여 {len(updates) - i}건은 다음 실행에서 처리")
+            break
         process_update(u)
+        ack(u["update_id"])   # 즉시 확정: 이후 타임아웃/크래시가 나도 이 건은 재처리 안 됨
+        print(f"update {u['update_id']} 처리·확정")
 
-    # offset 확정 → 다음 실행에서 중복 처리 방지
-    requests.get(f"{API}/getUpdates",
-                 params={"offset": updates[-1]["update_id"] + 1,
-                         "limit": 1, "timeout": 0}, timeout=20)
-    print(f"{len(updates)}건 처리 완료")
+    print("실행 완료")
 
 
 if __name__ == "__main__":
