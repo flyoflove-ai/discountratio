@@ -7,7 +7,7 @@
   → 인과 분해가 아닌 휴리스틱 배분임을 리포트에 명시
 """
 from config import (WEIGHTS, CATEGORY_MAP, FACTOR_LABELS,
-                    KOSPI_AVG_DIV_YIELD, GREEN_MAX, YELLOW_MAX)
+                    KOSPI_AVG_DIV_YIELD, KOSPI_AVG_PER, GREEN_MAX, YELLOW_MAX)
 
 
 def _clip(x, lo=0.0, hi=100.0):
@@ -85,13 +85,19 @@ def score_factors(stock, foreign, macro, hist) -> dict:
     else:
         f["foreign_netbuy"] = {"score": None, "detail": "데이터 없음"}
 
-    # ── 시장 모멘텀: KOSPI 20/60일 (하락 = 압력) ──
+    # ── 시장 모멘텀: KOSPI 20/60일 (하락 = 압력) + 데이터 오염 감지 ──
     kospi = macro.get("kospi")
     if kospi:
-        mom = kospi["chg_20d"] * 0.5 + kospi["chg_60d"] * 0.5
-        score = _clip(50 - mom * 5)  # -10% → 100
-        f["sector_momentum"] = {"score": score,
-                                "detail": f"KOSPI 20D {kospi['chg_20d']:+.1f}% / 60D {kospi['chg_60d']:+.1f}%"}
+        c20, c60 = kospi["chg_20d"], kospi["chg_60d"]
+        # 20일 변동이 ±12% 초과인데 60일과 방향이 모순되면 야후 데이터 오염으로 판단
+        if abs(c20) > 12 and (c20 * c60 < 0 or abs(c20) > abs(c60) * 2.5):
+            f["sector_momentum"] = {"score": 50,
+                                    "detail": f"⚠️ KOSPI 데이터 이상 감지 (20D {c20:+.1f}% vs 60D {c60:+.1f}%) → 중립(50) 처리"}
+        else:
+            mom = c20 * 0.5 + c60 * 0.5
+            score = _clip(50 - mom * 5)  # -10% → 100
+            f["sector_momentum"] = {"score": score,
+                                    "detail": f"KOSPI 20D {c20:+.1f}% / 60D {c60:+.1f}%"}
     else:
         f["sector_momentum"] = {"score": None, "detail": "데이터 없음"}
 
@@ -112,6 +118,11 @@ def score_factors(stock, foreign, macro, hist) -> dict:
         score = _clip((1 - ratio) * 100 + 50)  # 업종 대비 50% 할인 → 100
         f["multiple"] = {"score": score,
                          "detail": f"PER {per:.1f}x vs 업종 {ind_per:.1f}x" + (f", PBR {pbr:.2f}x" if pbr else "")}
+    elif per and per > 0:
+        ratio = per / KOSPI_AVG_PER
+        score = _clip((1 - ratio) * 100 + 50)  # 시장 평균 대비 근사
+        f["multiple"] = {"score": score,
+                         "detail": f"PER {per:.1f}x vs KOSPI평균 {KOSPI_AVG_PER:.0f}x" + (f", PBR {pbr:.2f}x" if pbr else "")}
     elif pbr:
         score = _clip((1.0 - pbr) * 60 + 50)  # PBR 1배 기준 근사
         f["multiple"] = {"score": score, "detail": f"PBR {pbr:.2f}x (업종 PER 미확보)"}
@@ -151,9 +162,11 @@ def build_report(code, stock, factors) -> str:
         lines.append("⚠️ 현재가/목표가 컨센서스 수집 실패 — 압력 점수만 표시")
     lines.append("")
 
-    # 유효 요인만 배분에 사용
+    # 유효 요인만 배분에 사용 — 실패 요인의 가중치 몫은 '미배분'으로 정직하게 표시
     valid = {k: v for k, v in factors.items() if v["score"] is not None}
     total_wp = sum(WEIGHTS[k] * v["score"] for k, v in valid.items()) or 1.0
+    coverage = sum(WEIGHTS[k] for k in valid) / sum(WEIGHTS.values())  # 0~1
+    alloc_gap = (gap * coverage) if (gap is not None and gap > 0) else None
 
     # 카테고리별 집계
     cat_contrib, cat_score_w, cat_w = {}, {}, {}
@@ -172,8 +185,8 @@ def build_report(code, stock, factors) -> str:
         avg = cat_score_w.get(cat, 0) / max(cat_w.get(cat, 1), 1)
         share = cat_contrib.get(cat, 0) / total_wp * 100
         head = f"{_emoji(avg)} <b>{cat}</b> — 압력 {avg:.0f}/100"
-        if gap is not None and gap > 0:
-            head += f", 할인 기여 {gap * share / 100:.1f}%p ({share:.0f}%)"
+        if alloc_gap is not None:
+            head += f", 할인 기여 {alloc_gap * share / 100:.1f}%p"
         lines.append(head)
         for k in keys:
             v = factors[k]
@@ -181,10 +194,13 @@ def build_report(code, stock, factors) -> str:
                          + (f" [{v['score']:.0f}]" if v["score"] is not None else ""))
         lines.append("")
 
-    # 수집 실패 항목 명시 (조용한 생략 방지)
+    # 수집 실패 항목 + 미배분 몫 명시 (조용한 생략/왜곡 방지)
     missing = [FACTOR_LABELS[k] for k, v in factors.items() if v["score"] is None]
     if missing:
-        lines.append("⚪ <b>수집 실패로 제외된 요인</b>: " + ", ".join(missing))
+        lines.append("⚪ <b>수집 실패로 제외</b>: " + ", ".join(missing))
+        if gap is not None and gap > 0:
+            lines.append(f"   → 총 할인율 중 <b>{gap * (1 - coverage):.1f}%p는 미배분</b> "
+                         f"(데이터 커버리지 {coverage*100:.0f}%)")
         lines.append("")
 
     # 구조 vs 시점 할인 구분
