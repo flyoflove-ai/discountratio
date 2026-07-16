@@ -181,6 +181,12 @@ def build_report(code, stock, factors) -> str:
                          + (f" [{v['score']:.0f}]" if v["score"] is not None else ""))
         lines.append("")
 
+    # 수집 실패 항목 명시 (조용한 생략 방지)
+    missing = [FACTOR_LABELS[k] for k, v in factors.items() if v["score"] is None]
+    if missing:
+        lines.append("⚪ <b>수집 실패로 제외된 요인</b>: " + ", ".join(missing))
+        lines.append("")
+
     # 구조 vs 시점 할인 구분
     if gap is not None and gap > 0:
         cyc = sum(cat_contrib.get(c, 0) for c in ["매크로", "수급", "업황/모멘텀"]) / total_wp
