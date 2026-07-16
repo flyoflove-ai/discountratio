@@ -1,1 +1,27 @@
+name: discount-bot
 
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # 15분마다 메시지 폴링 (Actions 크론은 지연 가능)
+  workflow_dispatch:          # 수동 실행으로 즉시 응답 가능
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
