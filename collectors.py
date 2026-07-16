@@ -248,6 +248,26 @@ def resolve_stock(query: str, debug: bool = False):
 # ────────────────────────────────────────────────────────
 # 1. 종목 기본 정보 + 컨센서스 (네이버)
 # ────────────────────────────────────────────────────────
+def fetch_yf_fundamentals(code: str) -> dict:
+    """야후 파이낸스 펀더멘털 (네이버 실패 시 fallback): PER, PBR, 배당수익률"""
+    out = {"per": None, "pbr": None, "dividend_yield": None}
+    for suffix in (".KS", ".KQ"):
+        try:
+            info = yf.Ticker(f"{code}{suffix}").info or {}
+            if not info.get("trailingPE") and not info.get("priceToBook"):
+                continue
+            out["per"] = info.get("trailingPE")
+            out["pbr"] = info.get("priceToBook")
+            dy = info.get("dividendYield")
+            if dy is not None:
+                # yfinance는 0.021 또는 2.1 두 형식이 혼재 → 1 미만이면 비율로 간주
+                out["dividend_yield"] = dy * 100 if dy < 1 else dy
+            break
+        except Exception:
+            continue
+    return out
+
+
 def fetch_stock_snapshot(code: str) -> dict:
     """
     반환 dict 키:
@@ -306,6 +326,13 @@ def fetch_stock_snapshot(code: str) -> dict:
                     out["target_price"] = _to_float(m.group(1))
         except Exception:
             pass
+
+    # ── 최종 fallback: 야후 펀더멘털 (PER/PBR/배당) — 네이버 totalInfos 실패 대비 ──
+    if out["per"] is None or out["pbr"] is None or out["dividend_yield"] is None:
+        yff = fetch_yf_fundamentals(code)
+        for k in ("per", "pbr", "dividend_yield"):
+            if out[k] is None:
+                out[k] = yff.get(k)
 
     return out
 
