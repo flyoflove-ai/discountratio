@@ -50,6 +50,9 @@ FACTOR_LABELS = {
 # 시장 평균 배당수익률 가정 (KOSPI, 필요 시 조정)
 KOSPI_AVG_DIV_YIELD = 2.0
 
+# 시장 평균 PER 가정 (업종 PER 미수집 시 멀티플 산출용)
+KOSPI_AVG_PER = 12.0
+
 # 신호등 임계값 (압력 점수 기준)
 GREEN_MAX = 35
 YELLOW_MAX = 65
