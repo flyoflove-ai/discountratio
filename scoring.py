@@ -85,14 +85,20 @@ def score_factors(stock, foreign, macro, hist) -> dict:
     else:
         f["foreign_netbuy"] = {"score": None, "detail": "데이터 없음"}
 
-    # ── 시장 모멘텀: KOSPI 20/60일 (하락 = 압력) + 데이터 오염 감지 ──
+    # ── 시장 모멘텀: KOSPI 20/60일 (하락 = 압력) + EWY 교차검증 ──
     kospi = macro.get("kospi")
+    ewy = macro.get("ewy")
     if kospi:
         c20, c60 = kospi["chg_20d"], kospi["chg_60d"]
-        # 20일 변동이 ±12% 초과인데 60일과 방향이 모순되면 야후 데이터 오염으로 판단
-        if abs(c20) > 12 and (c20 * c60 < 0 or abs(c20) > abs(c60) * 2.5):
+        suspect = abs(c20) > 12 and (c20 * c60 < 0 or abs(c20) > abs(c60) * 2.5)
+        if suspect and ewy:
+            # EWY(한국 ETF)도 같은 방향으로 크게 움직였으면 글리치가 아닌 실제 급변동
+            e20 = ewy["chg_20d"]
+            if c20 * e20 > 0 and abs(e20) > 8:
+                suspect = False
+        if suspect:
             f["sector_momentum"] = {"score": 50,
-                                    "detail": f"⚠️ KOSPI 데이터 이상 감지 (20D {c20:+.1f}% vs 60D {c60:+.1f}%) → 중립(50) 처리"}
+                                    "detail": f"⚠️ KOSPI 데이터 이상 의심 (20D {c20:+.1f}%, EWY 교차검증 불일치) → 중립(50) 처리"}
         else:
             mom = c20 * 0.5 + c60 * 0.5
             score = _clip(50 - mom * 5)  # -10% → 100
@@ -152,9 +158,16 @@ def build_report(code, stock, factors) -> str:
 
     if price and target and target > 0:
         gap = (target - price) / target * 100
-        lines.append(f"현재가 {price:,.0f}원 / 목표가 컨센 {target:,.0f}원")
+        chg = stock.get("chg_pct")
+        chg_str = f" (전일比 {chg:+.1f}%)" if chg is not None else ""
+        tdate = stock.get("target_date")
+        tdate_str = f" (컨센 기준 {tdate})" if tdate else ""
+        lines.append(f"현재가 {price:,.0f}원{chg_str} / 목표가 컨센 {target:,.0f}원{tdate_str}")
         if gap >= 0:
             lines.append(f"➡️ <b>총 할인율(괴리율): {gap:.1f}%</b>")
+            if gap > 35:
+                lines.append("⚠️ <i>괴리율이 이례적으로 큼 — 급락 국면에서 컨센서스는 후행하므로 "
+                             "목표가 하향 리비전 리스크를 감안해 해석할 것</i>")
         else:
             lines.append(f"➡️ <b>목표가 대비 프리미엄: {abs(gap):.1f}%</b> (목표가 상향 후행 가능성)")
     else:

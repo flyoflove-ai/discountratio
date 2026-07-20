@@ -60,12 +60,12 @@ def _get_json(url, retries=2):
 
 
 def _to_float(x):
+    """'12.3배', '1.44%', '279,500' 등에서 숫자만 추출"""
     if x is None:
         return None
-    try:
-        return float(str(x).replace(",", "").replace("%", "").strip())
-    except (ValueError, TypeError):
-        return None
+    s = str(x).replace(",", "")
+    m = re.search(r'-?\d+\.?\d*', s)
+    return float(m.group()) if m else None
 
 
 # ────────────────────────────────────────────────────────
@@ -276,14 +276,15 @@ def fetch_stock_snapshot(code: str) -> dict:
     (수집 실패한 항목은 None)
     """
     out = {k: None for k in
-           ["name", "price", "target_price", "per", "pbr",
-            "industry_per", "dividend_yield", "foreign_rate"]}
+           ["name", "price", "target_price", "target_date", "chg_pct",
+            "per", "pbr", "industry_per", "dividend_yield", "foreign_rate"]}
 
-    # ── basic: 현재가/종목명 ──
+    # ── basic: 현재가/종목명/전일비 ──
     basic = _get_json(NAVER_API.format(code=code, path="basic"))
     if basic:
         out["name"] = basic.get("stockName")
         out["price"] = _to_float(basic.get("closePrice"))
+        out["chg_pct"] = _to_float(basic.get("fluctuationsRatio"))
 
     # ── integration: 컨센서스 목표가 + 투자지표 ──
     integ = _get_json(NAVER_API.format(code=code, path="integration"))
@@ -291,6 +292,30 @@ def fetch_stock_snapshot(code: str) -> dict:
         cons = integ.get("consensusInfo") or {}
         out["target_price"] = _to_float(
             cons.get("priceTargetMean") or cons.get("targetPrice"))
+        out["target_date"] = cons.get("createDate")
+
+        # industryCompareInfo에서 업종 PER 탐색 (구조 미확정 → 재귀 스캔)
+        def _scan_industry_per(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    kl = str(k).lower()
+                    if "per" in kl and ("industry" in kl or "upjong" in kl
+                                        or "average" in kl or "compare" in kl):
+                        fv = _to_float(v)
+                        if fv and 0 < fv < 500:
+                            return fv
+                for v in obj.values():
+                    r = _scan_industry_per(v)
+                    if r:
+                        return r
+            elif isinstance(obj, list):
+                for v in obj:
+                    r = _scan_industry_per(v)
+                    if r:
+                        return r
+            return None
+        out["industry_per"] = _scan_industry_per(
+            integ.get("industryCompareInfo"))
 
         # totalInfos: [{code: "per", value: "12.3배"}, ...] 형태
         for item in integ.get("totalInfos", []):
@@ -350,21 +375,28 @@ def fetch_foreign_trend(code: str, pages: int = 4) -> dict:
         try:
             url = (f"https://finance.naver.com/item/frgn.naver"
                    f"?code={code}&page={page}")
-            html = requests.get(url, headers=HEADERS, timeout=10).text
-            # 행 패턴: 날짜 | 종가 | 전일비 | 등락률 | 거래량 | 기관 | 외국인 | 보유주수 | 보유율
-            rows = re.findall(
-                r'<td[^>]*>(\d{4}\.\d{2}\.\d{2})</td>(.*?)</tr>', html, re.S)
-            for _, body in rows:
-                cells = re.findall(r'<td[^>]*>\s*(?:<span[^>]*>)?([^<]*)', body)
-                cells = [c.strip() for c in cells if c.strip()]
-                nums = [c for c in cells if re.match(r'^[+\-]?[\d,.]+%?$', c)]
-                if len(nums) >= 7:
-                    own = _to_float(nums[-1])           # 마지막 = 보유율(%)
-                    fnet = _to_float(nums[-3])          # 외국인 순매매량
-                    if own is not None:
+            r = requests.get(url, headers=_headers("https://finance.naver.com/"),
+                             timeout=10)
+            html = r.content.decode("euc-kr", errors="ignore")
+            # 날짜가 포함된 <tr> 단위로 자른 뒤 태그 전체 제거 → 토큰 파싱 (구조 변화에 강건)
+            for rowhtml in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.S):
+                if not re.search(r'\d{4}\.\d{2}\.\d{2}', rowhtml):
+                    continue
+                text = re.sub(r'<[^>]+>', ' ', rowhtml)
+                # 숫자형 토큰만 추출: 부호/콤마/%/소수점 허용, 날짜는 제외
+                toks = [t for t in re.findall(r'[+\-]?[\d,]+\.?\d*%?', text)
+                        if not re.fullmatch(r'\d{4}', t)]
+                # 열 구성: 종가, 전일비, 등락률%, 거래량, 기관순매매, 외국인순매매, 보유주수, 보유율%
+                pct = [t for t in toks if t.endswith('%')]
+                if len(toks) >= 6 and pct:
+                    own = _to_float(pct[-1])            # 마지막 % 토큰 = 보유율
+                    if own is not None and 0 <= own <= 100:
                         ownership.append(own)
-                    if fnet is not None:
-                        netbuy.append(fnet)
+                    plain = [t for t in toks if not t.endswith('%')]
+                    if len(plain) >= 3:
+                        fnet = _to_float(plain[-2])     # 보유주수 바로 앞 = 외국인 순매매
+                        if fnet is not None:
+                            netbuy.append(fnet)
         except Exception:
             break
         time.sleep(0.3)
@@ -388,7 +420,8 @@ def fetch_macro() -> dict:
         return _MACRO_CACHE
 
     out = {}
-    tickers = {"tnx": "^TNX", "vix": "^VIX", "krw": "KRW=X", "kospi": "^KS11"}
+    tickers = {"tnx": "^TNX", "vix": "^VIX", "krw": "KRW=X", "kospi": "^KS11",
+               "ewy": "EWY"}  # EWY: KOSPI 데이터 교차검증용
     for key, tk in tickers.items():
         try:
             h = yf.Ticker(tk).history(period="1y")["Close"].dropna()
@@ -454,6 +487,8 @@ def raw_probe(code: str) -> str:
         lines.append("keys: " + ", ".join(list(integ.keys())[:15]))
         cons = integ.get("consensusInfo")
         lines.append("consensusInfo: " + _json.dumps(cons, ensure_ascii=False)[:350])
+        ici = integ.get("industryCompareInfo")
+        lines.append("industryCompareInfo: " + _json.dumps(ici, ensure_ascii=False)[:500])
         ti = integ.get("totalInfos")
         if isinstance(ti, list):
             lines.append(f"totalInfos {len(ti)}건, 샘플:")
