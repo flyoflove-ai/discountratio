@@ -359,6 +359,14 @@ def fetch_stock_snapshot(code: str) -> dict:
             if out[k] is None:
                 out[k] = yff.get(k)
 
+    # ── 배당 정합성: '주당배당금(원)'이 수익률(%)로 오인된 경우 교정 ──
+    dy = out.get("dividend_yield")
+    if dy is not None and dy > 15:
+        if out.get("price"):
+            out["dividend_yield"] = dy / out["price"] * 100  # DPS(원) → 수익률(%)
+        else:
+            out["dividend_yield"] = None  # 판별 불가 시 배제 (왜곡 방지)
+
     return out
 
 
